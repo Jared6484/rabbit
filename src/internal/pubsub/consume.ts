@@ -1,4 +1,6 @@
 import amqp, { type Channel } from "amqplib";
+import { resourceLimits } from "worker_threads";
+import {decode} from "@msgpack/msgpack";
 
 export enum AckType {
   Ack = "Ack",
@@ -19,6 +21,7 @@ export async function declareAndBind(
     durable: queueType === SimpleQueueType.Durable,
     autoDelete: queueType === SimpleQueueType.Transient,
     exclusive: queueType === SimpleQueueType.Transient,
+    arguments: {"x-dead-letter-exchange":"peril_dlx"},
   });
 
   await channel.bindQueue(q.queue,exchange, key );
@@ -36,31 +39,80 @@ export async function subscribeJSON<T>(
   queueName: string,
   key: string,
   queueType: SimpleQueueType,
-  handler: (data: T)  => AckType,
-  ): Promise<void>{
-    const [ch, queue] = await declareAndBind(conn, exchange, queueName, key, queueType);
+  handler: (data: T) => Promise<AckType> | AckType,
+): Promise<void> {
+  return subscribe(conn, exchange, queueName, key, queueType, handler, (data) =>
+    JSON.parse(data.toString()),
+  );
+}
 
-    ch.consume(queueName, (msg) =>{
+export async function subscribeMsgPack<T>(
+  conn: amqp.ChannelModel,
+  exchange: string,
+  queueName: string,
+  key: string,
+  queueType: SimpleQueueType,
+  handler: (data: T)  => Promise<AckType> | AckType,
+  ): Promise<void>{
+    return subscribe(
+      conn,
+      exchange,
+      queueName,
+      key,
+      queueType,
+      handler,
+      (data) => decode(data) as T,
+    );
+  }
+
+
+export async function subscribe<T>(
+  conn: amqp.ChannelModel,
+  exchange: string,
+  queueName: string,
+  routingKey: string,
+  SimpleQueueType: SimpleQueueType,
+  handler: (data: T) => Promise<AckType> | AckType,
+  deserializer: (data: Buffer) => T,
+): Promise<void> {
+  const [ch, queue] = await declareAndBind(conn, exchange, queueName, routingKey, SimpleQueueType);
+
+  await ch.prefetch(10);
+  
+  await ch.consume(queueName, async (msg: amqp.ConsumeMessage | null) =>{
     if(msg === null){
       return;
-    } else{
-      const msgStr = msg.content.toString();
-      const parsedMsg = JSON.parse(msgStr);
-      const ackType = handler(parsedMsg);
+    } 
+    
+    let data: T;
+    try{
+      data = deserializer(msg.content);
+    } catch(err){
+      console.error("Could not decode message:", err);
+      return;
+    }
+
+    try {
+      const ackType = await handler(data);
       switch(ackType){
         case AckType.Ack:
-          console.log(ackType);
           ch.ack(msg);
           break;
         case AckType.NackRequeue:
-          console.log(ackType);
           ch.nack(msg, false, true);
           break;
         case AckType.NackDiscard:
-          console.log(ackType);
           ch.nack(msg, false, false);
           break;
-      }
+        default:
+          const unreachable: never = ackType;
+          console.error("Unexpected ack type", unreachable);
+      } 
+    }catch (err) {
+      console.error("Error in handler", err);
+      ch.nack(msg, false, false);
     }
-    })
-  }
+  },
+  {noAck: false},
+  );
+}

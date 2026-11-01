@@ -91,3 +91,4 @@ export async function commandStatus(gs: GameState): Promise<void> {
     console.log(`* ${unit.id}: ${unit.location}, ${unit.rank}`);
   }
 }
+

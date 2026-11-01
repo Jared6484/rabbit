@@ -1,11 +1,12 @@
 import amqp from "amqplib";
 import { createConnection } from "net";
 import { publishJSON } from "../internal/pubsub/publish.js";
-import { ExchangePerilDirect, ExchangePerilTopic } from "../internal/routing/routing.js";
+import { ExchangePerilDirect, ExchangePerilTopic, GameLogSlug } from "../internal/routing/routing.js";
 import { PauseKey } from "../internal/routing/routing.js";
 import { type PlayingState } from "../internal/gamelogic/gamestate.js";
 import { getInput, printServerHelp } from "../internal/gamelogic/gamelogic.js";
-import { declareAndBind, SimpleQueueType } from "../internal/pubsub/consume.js";
+import { declareAndBind, SimpleQueueType, subscribeMsgPack } from "../internal/pubsub/consume.js";
+import { handlerLog } from "../server/handlers.js";
 
 async function main() {
   console.log("Starting Peril server...");
@@ -25,9 +26,20 @@ async function main() {
     conn.close();
   });
 
-  const queueName = "game_logs";
-  await declareAndBind(conn,ExchangePerilTopic ,queueName, "game_logs.*",SimpleQueueType.Durable)
-  
+  //const queueName = "game_logs";
+  subscribeMsgPack(
+    conn,
+    ExchangePerilTopic,
+    GameLogSlug, 
+    `${GameLogSlug}.*`,
+    SimpleQueueType.Durable,
+    handlerLog(),
+  );
+  // Used to run the server from a non-interactive source, like the multiserver.sh file
+  if (!process.stdin.isTTY) {
+    console.log("Non-interactive mode: skipping command input.");
+    return;
+  }
   printServerHelp();
   while(true){
     const input = await getInput();

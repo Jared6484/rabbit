@@ -1,17 +1,19 @@
 import amqp from "amqplib";
 import { createConnection } from "net";
-import { publishJSON } from "../internal/pubsub/publish.js";
-import { ArmyMovesPrefix, ExchangePerilDirect, ExchangePerilTopic } from "../internal/routing/routing.js";
+import { publishJSON, publishMsgPack } from "../internal/pubsub/publish.js";
+import { ArmyMovesPrefix, ExchangePerilDirect, ExchangePerilTopic, GameLogSlug, WarRecognitionsPrefix } from "../internal/routing/routing.js";
 import { PauseKey } from "../internal/routing/routing.js";
 import { GameState, type PlayingState } from "../internal/gamelogic/gamestate.js";
-import {clientWelcome, commandStatus, getInput, printClientHelp, printQuit} from "../internal/gamelogic/gamelogic.js"
+import {clientWelcome, commandStatus, getInput, getMaliciousLog, printClientHelp, printQuit} from "../internal/gamelogic/gamelogic.js"
 import { declareAndBind, SimpleQueueType, subscribeJSON } from "../internal/pubsub/consume.js";
 import { commandSpawn } from "../internal/gamelogic/spawn.js";
 import { commandMove, handleMove } from "../internal/gamelogic/move.js";
 import { handlePause } from "../internal/gamelogic/pause.js";
 import { handlerPause } from "./handlers.js";
-import { handlerMove } from "./handlers.js";
+import { handlerMove, handlerWar} from "./handlers.js";
 import { channel } from "diagnostics_channel";
+import type { GameLog } from "../internal/gamelogic/logs.js";
+import { log } from "console";
 
 async function main() {
   const userName = await clientWelcome();
@@ -25,14 +27,14 @@ async function main() {
   const confChannel = await conn.createConfirmChannel();
 
   process.on("SIGINT", () => {
-   console.log('Received SIGINT. Press CTL C to terminate' );
-   conn.close();
+    console.log('Received SIGINT. Press CTL C to terminate' );
+    conn.close();
   });
 
   const queueName = `${PauseKey}.${userName}`
   //await declareAndBind(conn, ExchangePerilDirect, queueName, PauseKey, SimpleQueueType.Transient);
 
-  const gameState: GameState = new GameState("username"); // don't really need the annotation :GameState, but can still do it.
+  const gameState: GameState = new GameState(userName); // don't really need the annotation :GameState, but can still do it.
   await subscribeJSON(
     conn, 
     ExchangePerilDirect, 
@@ -47,7 +49,17 @@ async function main() {
     `army_moves.${userName}`,
     `${ArmyMovesPrefix}.*`,
     SimpleQueueType.Transient,
-    handlerMove(gameState));
+    handlerMove(gameState, confChannel));
+
+  await subscribeJSON(
+    conn,
+    ExchangePerilTopic,
+    WarRecognitionsPrefix,
+    `${WarRecognitionsPrefix}.*`,
+    SimpleQueueType.Durable,
+    handlerWar(gameState, confChannel),
+  );
+
 
   while(true){
     
@@ -66,12 +78,13 @@ async function main() {
       case "move":
         try{
           let move = commandMove(gameState, input);
-          publishJSON(confChannel, ExchangePerilTopic, `army_moves.${userName}`, move);
+          publishJSON(confChannel, ExchangePerilTopic, `${ArmyMovesPrefix}.${userName}`, move);
           console.log("Move completed successfully");
         } catch(err){
           console.error(`Error caught: ${err}`);
           continue;
-        };
+ 
+       };
         break;
 
       case "status":
@@ -83,7 +96,18 @@ async function main() {
         break;
 
       case "spam":
-        console.log("Spamming not allowed yet!");
+        if(input[1] === undefined) return; 
+        const spamCount = parseInt(input[1], 10);
+        if(Number.isNaN(spamCount)){return}
+        for(let i = 0; i< spamCount; i++){
+          let message = getMaliciousLog();
+          await publishGameLog(
+            confChannel,
+            userName,
+            message,
+          );
+        }
+        //console.log("Spamming not allowed yet!");
         break;
 
       case "quit":
@@ -93,12 +117,26 @@ async function main() {
       default: 
         console.log("Unknown Command");
         break;
-
     };
   }
-
 };
 
+export function publishGameLog(
+  ch: amqp.ConfirmChannel, 
+  userName: string, 
+  msg: string): Promise<void> {
+    const gameLog: GameLog = {
+      currentTime: new Date(),
+      message: msg,
+      username: userName,
+    };
+    return publishMsgPack(
+      ch, 
+      ExchangePerilTopic, 
+      `${GameLogSlug}.${userName}`, 
+      gameLog
+    );
+} 
 
 main().catch((err) => {
   console.error("Fatal error:", err);

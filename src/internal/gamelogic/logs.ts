@@ -19,7 +19,7 @@ export async function writeLog(gameLog: GameLog): Promise<void> {
   block(writeToDiskSleep);
 
   const date = new Date(gameLog.currentTime);
-  const timestamp = date.toISOString();
+  const timestamp = date.toString();
   const logEntry = `${timestamp} ${gameLog.username}: ${gameLog.message}\n`;
 
   try {
